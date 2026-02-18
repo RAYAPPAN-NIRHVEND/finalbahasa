@@ -45,7 +45,7 @@ const multer     = require('multer');
 const fs         = require('fs').promises;
 
 const app        = express();
-const PORT       = process.env.PORT || 3001;
+const PORT       = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'ganti-secret-ini';
 const ADMIN_URL  = 'https://polyglotquest.netlify.app/admin.html';
 const GAME_URL   = 'https://polyglotquest.netlify.app/game.html';

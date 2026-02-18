@@ -1,0 +1,5 @@
+build:
+  command: npm install
+
+run:
+  command: node server.js

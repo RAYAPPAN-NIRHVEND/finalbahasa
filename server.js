@@ -1,5 +1,5 @@
 // ============================================================================
-// PolyglotQuest — Backend API
+// PolyglotQuest — Backend API (Supabase Edition)
 // ============================================================================
 
 require('dotenv').config();
@@ -9,59 +9,43 @@ const cors       = require('cors');
 const bcrypt     = require('bcryptjs');
 const jwt        = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
-const multer     = require('multer');
-const fs         = require('fs').promises;
+const { createClient } = require('@supabase/supabase-js');
 
 const app        = express();
 const PORT       = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'ganti-secret-ini';
-const ADMIN_URL  = 'https://polyglotquest.netlify.app/admin.html';
-const GAME_URL   = 'https://polyglotquest.netlify.app/game.html';
+const ADMIN_URL  = process.env.ADMIN_URL  || 'https://polyglotquest.netlify.app/admin.html';
+const GAME_URL   = process.env.GAME_URL   || 'https://polyglotquest.netlify.app/game.html';
 
-// ── CORS ─────────────────────────────────────────────────────────────────────
-app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] }));
-app.options('*', cors());
+// ── SUPABASE ──────────────────────────────────────────────────────────────────
+const SUPABASE_URL  = process.env.SUPABASE_URL  || 'https://nshnhqjelnbnkyvljraf.supabase.co';
+const SUPABASE_KEY  = process.env.SUPABASE_KEY  || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5zaG5ocWplbG5ibmt5dmxqcmFmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE0MjM4MjYsImV4cCI6MjA4Njk5OTgyNn0.ZkYNb-ZeGWS5IpLIXmrOci9oRSlLyTY8nAGKOHQKHJo';
+const supabase      = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ── CORS ──────────────────────────────────────────────────────────────────────
+const corsOptions = {
+    origin: '*',
+    methods: ['GET','POST','PUT','DELETE','OPTIONS','PATCH'],
+    allowedHeaders: ['Content-Type','Authorization','x-admin-password','X-Admin-Password'],
+    credentials: false
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
-app.use('/uploads', express.static('/tmp/uploads'));
-
-// ── FILE UPLOAD ───────────────────────────────────────────────────────────────
-// Leapcell filesystem is read-only except /tmp
-const UPLOAD_DIR = '/tmp/uploads';
-const storage = multer.diskStorage({
-    destination: UPLOAD_DIR,
-    filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
-});
-const upload = multer({ storage });
 
 // ── EMAIL ─────────────────────────────────────────────────────────────────────
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
 });
-
-// ── DATABASE (File JSON) ──────────────────────────────────────────────────────
-// Use /tmp for writable storage on Leapcell
-const DB_DIR       = '/tmp/database';
-const USERS_FILE   = `${DB_DIR}/users.json`;
-const PAYMENTS_FILE= `${DB_DIR}/payments.json`;
-const PROGRESS_FILE= `${DB_DIR}/progress.json`;
-const RESETS_FILE  = `${DB_DIR}/resets.json`;
-
-async function initDB() {
-    await fs.mkdir(DB_DIR, { recursive: true });
-    await fs.mkdir(UPLOAD_DIR, { recursive: true });
-    for (const [file, def] of [[USERS_FILE,'[]'],[PAYMENTS_FILE,'[]'],[PROGRESS_FILE,'{}'],[RESETS_FILE,'[]']]) {
-        try { await fs.access(file); } catch { await fs.writeFile(file, def); }
-    }
-    console.log('✓ Database siap');
-}
-
-async function readDB(file) {
-    try { return JSON.parse(await fs.readFile(file, 'utf8')); }
-    catch { return file === PROGRESS_FILE ? {} : []; }
-}
-async function writeDB(file, data) {
-    await fs.writeFile(file, JSON.stringify(data, null, 2));
+async function sendMail(to, subject, html) {
+    try {
+        await transporter.sendMail({
+            from: `"PolyglotQuest" <${process.env.EMAIL_USER}>`,
+            to, subject, html
+        });
+        console.log('✓ Email terkirim ke', to);
+    } catch(e) { console.error('Email gagal:', e.message); }
 }
 
 // ── AUTH MIDDLEWARE ───────────────────────────────────────────────────────────
@@ -75,13 +59,26 @@ function auth(req, res, next) {
     });
 }
 
-// ── HELPER EMAIL ──────────────────────────────────────────────────────────────
-async function sendMail(to, subject, html) {
-    try {
-        await transporter.sendMail({ from: `"PolyglotQuest" <${process.env.EMAIL_USER}>`, to, subject, html });
-        console.log('✓ Email terkirim ke', to);
-    } catch(e) { console.error('Email gagal:', e.message); }
+// ── SUPABASE HELPERS ──────────────────────────────────────────────────────────
+async function getUser(id) {
+    const { data } = await supabase.from('users').select('*').eq('id', id).single();
+    return data;
 }
+async function getUserByEmail(email) {
+    const { data } = await supabase.from('users').select('*').eq('email', email).single();
+    return data;
+}
+async function updateUser(id, updates) {
+    const { data, error } = await supabase.from('users').update(updates).eq('id', id).select().single();
+    if (error) throw error;
+    return data;
+}
+
+// ============================================================================
+// HEALTH CHECK
+// ============================================================================
+
+app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now(), db: 'supabase' }));
 
 // ============================================================================
 // AUTH ENDPOINTS
@@ -95,30 +92,31 @@ app.post('/api/auth/register', async (req, res) => {
             return res.status(400).json({ error: 'Semua field wajib diisi' });
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
             return res.status(400).json({ error: 'Format email tidak valid' });
-        if (password.length < 8)
-            return res.status(400).json({ error: 'Password minimal 8 karakter' });
+        if (password.length < 6)
+            return res.status(400).json({ error: 'Password minimal 6 karakter' });
 
         const phoneDigits = phone.replace(/[\s\-\+]/g, '');
         if (!/^\d{10,15}$/.test(phoneDigits))
             return res.status(400).json({ error: 'Format no. ponsel tidak valid' });
 
-        const users = await readDB(USERS_FILE);
-        if (users.find(u => u.email === email))
-            return res.status(400).json({ error: 'Email sudah terdaftar' });
-        if (users.find(u => u.phone === phone))
-            return res.status(400).json({ error: 'No. ponsel sudah terdaftar' });
+        // Cek email sudah terdaftar
+        const existing = await getUserByEmail(email);
+        if (existing) return res.status(400).json({ error: 'Email sudah terdaftar' });
+
+        // Cek phone
+        const { data: phoneCheck } = await supabase.from('users').select('id').eq('phone', phone).single();
+        if (phoneCheck) return res.status(400).json({ error: 'No. ponsel sudah terdaftar' });
 
         const newUser = {
             id: Date.now().toString(),
             name, email, phone,
             password: await bcrypt.hash(password, 10),
-            freeTrials: 5,
-            points: 0,
-            createdAt: new Date().toISOString(),
-            verified: true
+            free_trials: 5,
+            points: 0
         };
-        users.push(newUser);
-        await writeDB(USERS_FILE, users);
+
+        const { error: insertErr } = await supabase.from('users').insert([newUser]);
+        if (insertErr) throw insertErr;
 
         // Notif admin
         const waLink = `https://wa.me/${phoneDigits}`;
@@ -146,15 +144,24 @@ app.post('/api/auth/register', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
-        const users = await readDB(USERS_FILE);
-        const user = users.find(u => u.email === email);
+        const user = await getUserByEmail(email);
         if (!user) return res.status(401).json({ error: 'Email tidak terdaftar' });
         if (!await bcrypt.compare(password, user.password))
             return res.status(401).json({ error: 'Password salah' });
 
         const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: '30d' });
-        res.json({ token, user: { id: user.id, name: user.name, email: user.email, freeTrials: user.freeTrials, points: user.points } });
+        res.json({
+            token,
+            user: {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                freeTrials: user.free_trials,
+                points: user.points
+            }
+        });
     } catch(e) {
+        console.error(e);
         res.status(500).json({ error: 'Terjadi kesalahan server' });
     }
 });
@@ -162,29 +169,37 @@ app.post('/api/auth/login', async (req, res) => {
 // GET PROFIL
 app.get('/api/auth/me', auth, async (req, res) => {
     try {
-        const users = await readDB(USERS_FILE);
-        const user = users.find(u => u.id === req.userId);
+        const user = await getUser(req.userId);
         if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
-        res.json({ id: user.id, name: user.name, email: user.email, freeTrials: user.freeTrials, points: user.points });
+        res.json({
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            freeTrials: user.free_trials,
+            points: user.points
+        });
     } catch(e) {
+        console.error(e);
         res.status(500).json({ error: 'Terjadi kesalahan server' });
     }
 });
 
-// REQUEST RESET PASSWORD (user kirim email, notif ke admin)
+// REQUEST RESET PASSWORD
 app.post('/api/auth/reset-request', async (req, res) => {
     try {
         const { email } = req.body;
         if (!email) return res.status(400).json({ error: 'Email harus diisi' });
 
-        const users = await readDB(USERS_FILE);
-        const user  = users.find(u => u.email === email);
-
-        // Selalu balas sukses agar tidak bocorkan info email terdaftar atau tidak
+        const user = await getUserByEmail(email);
         if (user) {
-            const resets = await readDB(RESETS_FILE);
-            resets.push({ id: Date.now().toString(), userId: user.id, userName: user.name, userEmail: user.email, userPhone: user.phone || '-', requestedAt: new Date().toISOString(), status: 'pending' });
-            await writeDB(RESETS_FILE, resets);
+            await supabase.from('reset_requests').insert([{
+                id: Date.now().toString(),
+                user_id: user.id,
+                user_name: user.name,
+                user_email: user.email,
+                user_phone: user.phone || '-',
+                status: 'pending'
+            }]);
 
             await sendMail(
                 process.env.ADMIN_EMAIL,
@@ -200,9 +215,40 @@ app.post('/api/auth/reset-request', async (req, res) => {
             );
         }
 
-        res.json({ message: 'Jika email terdaftar, permintaan telah dikirim ke admin. Admin akan menghubungi kamu dalam 1x24 jam.' });
+        res.json({ message: 'Jika email terdaftar, permintaan telah dikirim ke admin.' });
     } catch(e) {
         res.status(500).json({ error: 'Terjadi kesalahan server' });
+    }
+});
+
+// ============================================================================
+// DEDUCT TRIAL / POINTS — sinkron antar semua device
+// ============================================================================
+
+app.post('/api/user/deduct', auth, async (req, res) => {
+    try {
+        const { trialCost = 0, pointCost = 0 } = req.body;
+
+        const user = await getUser(req.userId);
+        if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
+
+        const curTrials = user.free_trials || 0;
+        const curPoints = user.points || 0;
+
+        if (trialCost > 0 && curTrials < trialCost)
+            return res.status(400).json({ error: 'Trial tidak cukup', freeTrials: curTrials, points: curPoints });
+        if (pointCost > 0 && curPoints < pointCost)
+            return res.status(400).json({ error: 'Points tidak cukup', freeTrials: curTrials, points: curPoints });
+
+        const updated = await updateUser(req.userId, {
+            free_trials: curTrials - trialCost,
+            points: curPoints - pointCost
+        });
+
+        res.json({ success: true, freeTrials: updated.free_trials, points: updated.points });
+    } catch(e) {
+        console.error(e);
+        res.status(500).json({ error: 'Server error' });
     }
 });
 
@@ -212,31 +258,33 @@ app.post('/api/auth/reset-request', async (req, res) => {
 
 app.get('/api/progress', auth, async (req, res) => {
     try {
-        const progress = await readDB(PROGRESS_FILE);
-        res.json(progress[req.userId] || {});
+        const { data } = await supabase.from('progress').select('*').eq('user_id', req.userId);
+        const result = {};
+        (data || []).forEach(row => { result[row.key] = { level: row.level, score: row.score }; });
+        res.json(result);
     } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.post('/api/progress', auth, async (req, res) => {
     try {
         const { languageId, difficultyId, level, score } = req.body;
-        const progress = await readDB(PROGRESS_FILE);
-        if (!progress[req.userId]) progress[req.userId] = {};
         const key = `${languageId}_${difficultyId}`;
-        if (!progress[req.userId][key]) progress[req.userId][key] = { level: 0, score: 0 };
-        progress[req.userId][key].level = Math.max(progress[req.userId][key].level, level);
-        progress[req.userId][key].score += score;
-        await writeDB(PROGRESS_FILE, progress);
 
-        const users = await readDB(USERS_FILE);
-        const idx = users.findIndex(u => u.id === req.userId);
-        if (idx !== -1) {
-            if (users[idx].freeTrials > 0) users[idx].freeTrials--;
-            else if (users[idx].points > 0) users[idx].points--;
-            else return res.status(403).json({ error: 'Trial dan poin habis' });
-            await writeDB(USERS_FILE, users);
+        const { data: existing } = await supabase.from('progress')
+            .select('*').eq('user_id', req.userId).eq('key', key).single();
+
+        if (existing) {
+            await supabase.from('progress').update({
+                level: Math.max(existing.level, level),
+                score: existing.score + score
+            }).eq('user_id', req.userId).eq('key', key);
+        } else {
+            await supabase.from('progress').insert([{
+                user_id: req.userId, key, level, score
+            }]);
         }
-        res.json({ message: 'Progress tersimpan', progress: progress[req.userId] });
+
+        res.json({ message: 'Progress tersimpan' });
     } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -244,51 +292,56 @@ app.post('/api/progress', auth, async (req, res) => {
 // PAYMENT
 // ============================================================================
 
-app.post('/api/payment/submit', auth, upload.single('proof'), async (req, res) => {
+app.post('/api/payment/submit', auth, async (req, res) => {
     try {
-        const { packageType, points, amount, method } = req.body;
-        if (!req.file) return res.status(400).json({ error: 'Bukti transfer wajib diupload' });
+        const { package: pkgRaw, packageName, packageType, points, amount, method, proof } = req.body;
 
-        const validPkgs = {
-            single: { points: 300, price: 15000, name: 'Single Language (300 pts)' },
-            full:   { points: 2100, price: 49000, name: 'Full Access 7-in-1 (2,100 pts)' }
-        };
-        const pkg = validPkgs[packageType];
-        if (!pkg || pkg.points !== parseInt(points) || pkg.price !== parseInt(amount))
-            return res.status(400).json({ error: 'Paket tidak valid' });
-
-        const users = await readDB(USERS_FILE);
-        const user  = users.find(u => u.id === req.userId);
+        const user = await getUser(req.userId);
         if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
+
+        const pkgName   = packageName || pkgRaw || 'Custom';
+        const pkgPoints = parseInt(points) || 0;
+        const pkgAmount = parseInt(amount) || 0;
 
         const payment = {
             id: Date.now().toString(),
-            userId: req.userId, userName: user.name, userEmail: user.email,
-            packageType, packageName: pkg.name,
-            points: parseInt(points), amount: parseInt(amount), method,
-            proofImage: `/uploads/${req.file.filename}`,
-            status: 'pending', createdAt: new Date().toISOString()
+            user_id: req.userId,
+            user_name: user.name,
+            user_email: user.email,
+            package_name: pkgName,
+            package_type: packageType || 'custom',
+            points: pkgPoints,
+            amount: pkgAmount,
+            method: method || '-',
+            proof_image: proof || null,
+            status: 'pending'
         };
-        const payments = await readDB(PAYMENTS_FILE);
-        payments.push(payment);
-        await writeDB(PAYMENTS_FILE, payments);
 
-        await sendMail(process.env.ADMIN_EMAIL, '💳 Pembayaran Baru - PolyglotQuest',
-            `<div style="font-family:Arial;padding:20px;"><h2 style="color:#f59e0b;">💳 Pembayaran Baru</h2>
+        const { error: insertErr } = await supabase.from('payments').insert([payment]);
+        if (insertErr) throw insertErr;
+
+        await sendMail(
+            process.env.ADMIN_EMAIL,
+            '💳 Pembayaran Baru - PolyglotQuest',
+            `<div style="font-family:Arial;padding:20px;">
+            <h2 style="color:#f59e0b;">💳 Pembayaran Baru</h2>
             <p><b>User:</b> ${user.name} (${user.email})</p>
-            <p><b>Paket:</b> ${pkg.name}</p>
-            <p><b>Total:</b> Rp ${parseInt(amount).toLocaleString('id-ID')}</p>
+            <p><b>Paket:</b> ${pkgName}</p>
+            <p><b>Total:</b> Rp ${pkgAmount.toLocaleString('id-ID')}</p>
             <p><b>Metode:</b> ${method}</p>
             <a href="${ADMIN_URL}" style="display:inline-block;background:#6366f1;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;margin-top:12px;">Buka Admin Panel</a></div>`
         );
-        await sendMail(user.email, '✅ Pembayaran Diterima - PolyglotQuest',
-            `<div style="font-family:Arial;padding:20px;"><h2 style="color:#10b981;">✅ Pembayaran Diterima</h2>
+        await sendMail(
+            user.email,
+            '✅ Pembayaran Diterima - PolyglotQuest',
+            `<div style="font-family:Arial;padding:20px;">
+            <h2 style="color:#10b981;">✅ Pembayaran Diterima</h2>
             <p>Halo <b>${user.name}</b>, pembayaran kamu sedang diverifikasi.</p>
-            <p><b>Paket:</b> ${pkg.name} | <b>Total:</b> Rp ${parseInt(amount).toLocaleString('id-ID')}</p>
+            <p><b>Paket:</b> ${pkgName} | <b>Total:</b> Rp ${pkgAmount.toLocaleString('id-ID')}</p>
             <p>Points akan masuk otomatis setelah admin menyetujui (maks 1x24 jam).</p></div>`
         );
 
-        res.json({ success: true, message: 'Pembayaran disubmit, menunggu verifikasi admin.', payment });
+        res.json({ success: true, message: 'Pembayaran disubmit.', id: payment.id, payment });
     } catch(e) {
         console.error(e);
         res.status(500).json({ error: 'Server error' });
@@ -297,8 +350,8 @@ app.post('/api/payment/submit', auth, upload.single('proof'), async (req, res) =
 
 app.get('/api/payments/user', auth, async (req, res) => {
     try {
-        const payments = await readDB(PAYMENTS_FILE);
-        res.json(payments.filter(p => p.userId === req.userId));
+        const { data } = await supabase.from('payments').select('*').eq('user_id', req.userId).order('created_at', { ascending: false });
+        res.json(data || []);
     } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -308,54 +361,62 @@ app.get('/api/payments/user', auth, async (req, res) => {
 
 app.get('/api/admin/payments/all', async (req, res) => {
     try {
-        const payments = await readDB(PAYMENTS_FILE);
-        payments.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
-        res.json(payments);
+        const { data } = await supabase.from('payments').select('*').order('created_at', { ascending: false });
+        res.json(data || []);
     } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.post('/api/admin/payments/:id/approve', async (req, res) => {
     try {
-        const payments = await readDB(PAYMENTS_FILE);
-        const idx = payments.findIndex(p => p.id === req.params.id);
-        if (idx === -1) return res.status(404).json({ error: 'Tidak ditemukan' });
-        if (payments[idx].status !== 'pending') return res.status(400).json({ error: 'Sudah diproses' });
+        const { data: payment } = await supabase.from('payments').select('*').eq('id', req.params.id).single();
+        if (!payment) return res.status(404).json({ error: 'Tidak ditemukan' });
+        if (payment.status !== 'pending') return res.status(400).json({ error: 'Sudah diproses' });
 
-        payments[idx].status    = 'approved';
-        payments[idx].approvedAt= new Date().toISOString();
-        await writeDB(PAYMENTS_FILE, payments);
+        await supabase.from('payments').update({
+            status: 'approved',
+            approved_at: new Date().toISOString()
+        }).eq('id', req.params.id);
 
-        const users = await readDB(USERS_FILE);
-        const uIdx  = users.findIndex(u => u.id === payments[idx].userId);
-        if (uIdx !== -1) { users[uIdx].points += payments[idx].points; await writeDB(USERS_FILE, users); }
+        const user = await getUser(payment.user_id);
+        if (user) {
+            await updateUser(payment.user_id, { points: (user.points || 0) + payment.points });
+        }
 
-        await sendMail(payments[idx].userEmail, '🎉 Pembayaran Disetujui - PolyglotQuest',
-            `<div style="font-family:Arial;padding:20px;"><h2 style="color:#10b981;">🎉 Pembayaran Disetujui!</h2>
-            <p><b>+${payments[idx].points} Points</b> sudah masuk ke akun kamu!</p>
+        await sendMail(
+            payment.user_email,
+            '🎉 Pembayaran Disetujui - PolyglotQuest',
+            `<div style="font-family:Arial;padding:20px;">
+            <h2 style="color:#10b981;">🎉 Pembayaran Disetujui!</h2>
+            <p><b>+${payment.points} Points</b> sudah masuk ke akun kamu!</p>
             <a href="${GAME_URL}" style="display:inline-block;background:#6366f1;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;margin-top:12px;">Mulai Belajar</a></div>`
         );
-        res.json({ message: 'Diapprove', payment: payments[idx] });
-    } catch(e) { res.status(500).json({ error: 'Server error' }); }
+
+        res.json({ message: 'Diapprove' });
+    } catch(e) { console.error(e); res.status(500).json({ error: 'Server error' }); }
 });
 
 app.post('/api/admin/payments/:id/reject', async (req, res) => {
     try {
         const { reason } = req.body;
-        const payments = await readDB(PAYMENTS_FILE);
-        const idx = payments.findIndex(p => p.id === req.params.id);
-        if (idx === -1) return res.status(404).json({ error: 'Tidak ditemukan' });
+        const { data: payment } = await supabase.from('payments').select('*').eq('id', req.params.id).single();
+        if (!payment) return res.status(404).json({ error: 'Tidak ditemukan' });
 
-        payments[idx].status    = 'rejected';
-        payments[idx].rejectedAt= new Date().toISOString();
-        payments[idx].rejectReason = reason || 'Bukti tidak valid';
-        await writeDB(PAYMENTS_FILE, payments);
+        await supabase.from('payments').update({
+            status: 'rejected',
+            rejected_at: new Date().toISOString(),
+            reject_reason: reason || 'Bukti tidak valid'
+        }).eq('id', req.params.id);
 
-        await sendMail(payments[idx].userEmail, '❌ Pembayaran Ditolak - PolyglotQuest',
-            `<div style="font-family:Arial;padding:20px;"><h2 style="color:#ef4444;">❌ Pembayaran Ditolak</h2>
-            <p><b>Alasan:</b> ${payments[idx].rejectReason}</p>
+        await sendMail(
+            payment.user_email,
+            '❌ Pembayaran Ditolak - PolyglotQuest',
+            `<div style="font-family:Arial;padding:20px;">
+            <h2 style="color:#ef4444;">❌ Pembayaran Ditolak</h2>
+            <p><b>Alasan:</b> ${reason || 'Bukti tidak valid'}</p>
             <p>Silakan coba lagi dengan bukti yang valid.</p></div>`
         );
-        res.json({ message: 'Ditolak', payment: payments[idx] });
+
+        res.json({ message: 'Ditolak' });
     } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -363,121 +424,123 @@ app.post('/api/admin/payments/:id/reject', async (req, res) => {
 // ADMIN — USERS
 // ============================================================================
 
-// Lihat semua user (termasuk hash password)
 app.get('/api/admin/users', async (req, res) => {
     try {
-        const users = await readDB(USERS_FILE);
-        const result = users
-            .map(u => ({ id: u.id, name: u.name, email: u.email, phone: u.phone || '-', password: u.password, freeTrials: u.freeTrials, points: u.points, createdAt: u.createdAt }))
-            .sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+        const { data } = await supabase.from('users')
+            .select('id,name,email,phone,password,free_trials,points,created_at')
+            .order('created_at', { ascending: false });
+        const result = (data || []).map(u => ({
+            id: u.id,
+            name: u.name,
+            email: u.email,
+            phone: u.phone || '-',
+            password: u.password,
+            freeTrials: u.free_trials,
+            points: u.points,
+            createdAt: u.created_at
+        }));
         res.json(result);
     } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// Ganti password user (oleh admin)
 app.post('/api/admin/users/:userId/password', async (req, res) => {
     try {
         const { newPassword } = req.body;
-        if (!newPassword || newPassword.length < 8)
-            return res.status(400).json({ error: 'Password minimal 8 karakter' });
+        if (!newPassword || newPassword.length < 6)
+            return res.status(400).json({ error: 'Password minimal 6 karakter' });
 
-        const users = await readDB(USERS_FILE);
-        const idx   = users.findIndex(u => u.id === req.params.userId);
-        if (idx === -1) return res.status(404).json({ error: 'User tidak ditemukan' });
+        const user = await getUser(req.params.userId);
+        if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
 
-        users[idx].password = await bcrypt.hash(newPassword, 10);
-        await writeDB(USERS_FILE, users);
+        await updateUser(req.params.userId, { password: await bcrypt.hash(newPassword, 10) });
 
-        await sendMail(users[idx].email, '🔑 Password Akun Direset - PolyglotQuest',
-            `<div style="font-family:Arial;padding:20px;"><h2 style="color:#6366f1;">🔑 Password Berhasil Direset</h2>
-            <p>Halo <b>${users[idx].name}</b>, password akun kamu telah diganti oleh admin.</p>
+        await sendMail(
+            user.email,
+            '🔑 Password Akun Direset - PolyglotQuest',
+            `<div style="font-family:Arial;padding:20px;">
+            <h2 style="color:#6366f1;">🔑 Password Berhasil Direset</h2>
+            <p>Halo <b>${user.name}</b>, password akun kamu telah diganti oleh admin.</p>
             <p><b>Password Baru:</b> <code style="background:#f3f4f6;padding:2px 8px;border-radius:4px;">${newPassword}</code></p>
-            <p>Segera login dan ganti ke password yang kamu inginkan.</p>
             <a href="${GAME_URL}" style="display:inline-block;background:#6366f1;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;margin-top:12px;">Login Sekarang</a></div>`
         );
+
         res.json({ message: 'Password berhasil diganti' });
     } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// Tambah 1 trial ke user
 app.post('/api/admin/users/:userId/add-trial', async (req, res) => {
     try {
-        const users = await readDB(USERS_FILE);
-        const idx   = users.findIndex(u => u.id === req.params.userId);
-        if (idx === -1) return res.status(404).json({ error: 'User tidak ditemukan' });
-        users[idx].freeTrials = (users[idx].freeTrials || 0) + 1;
-        await writeDB(USERS_FILE, users);
-        res.json({ message: 'Trial ditambahkan', freeTrials: users[idx].freeTrials });
+        const user = await getUser(req.params.userId);
+        if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
+        const updated = await updateUser(req.params.userId, { free_trials: (user.free_trials || 0) + 1 });
+        res.json({ message: 'Trial ditambahkan', freeTrials: updated.free_trials });
     } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// Lihat permintaan reset password
+app.post('/api/admin/users/:userId/add-points', async (req, res) => {
+    try {
+        const { points } = req.body;
+        if (!points || points <= 0) return res.status(400).json({ error: 'Points tidak valid' });
+        const user = await getUser(req.params.userId);
+        if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
+        const updated = await updateUser(req.params.userId, { points: (user.points || 0) + parseInt(points) });
+        res.json({ message: 'Points ditambahkan', points: updated.points });
+    } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
 app.get('/api/admin/reset-requests', async (req, res) => {
     try {
-        const resets = await readDB(RESETS_FILE);
-        resets.sort((a,b) => new Date(b.requestedAt) - new Date(a.requestedAt));
-        res.json(resets);
+        const { data } = await supabase.from('reset_requests').select('*').order('requested_at', { ascending: false });
+        const result = (data || []).map(r => ({
+            id: r.id,
+            userId: r.user_id,
+            name: r.user_name,
+            email: r.user_email,
+            phone: r.user_phone,
+            requestedAt: r.requested_at,
+            status: r.status
+        }));
+        res.json(result);
     } catch(e) { res.status(500).json({ error: 'Server error' }); }
-});
-
-// ============================================================================
-// DEDUCT TRIAL / POINTS (dipanggil setiap kali user mulai level)
-// ============================================================================
-
-// Kurangi trial atau poin user secara langsung di database
-app.post('/api/user/deduct', auth, async (req, res) => {
-    try {
-        const { trialCost = 0, pointCost = 0 } = req.body;
-
-        if (trialCost < 0 || pointCost < 0)
-            return res.status(400).json({ error: 'Cost tidak valid' });
-
-        const users = await readDB(USERS_FILE);
-        const idx   = users.findIndex(u => u.id === req.userId);
-        if (idx === -1) return res.status(404).json({ error: 'User tidak ditemukan' });
-
-        const user = users[idx];
-        const curTrials = user.freeTrials || 0;
-        const curPoints = user.points     || 0;
-
-        // Validasi cukup
-        if (trialCost > 0 && curTrials < trialCost)
-            return res.status(400).json({ error: 'Trial tidak cukup', freeTrials: curTrials, points: curPoints });
-        if (pointCost > 0 && curPoints < pointCost)
-            return res.status(400).json({ error: 'Points tidak cukup', freeTrials: curTrials, points: curPoints });
-
-        users[idx].freeTrials = curTrials - trialCost;
-        users[idx].points     = curPoints - pointCost;
-
-        await writeDB(USERS_FILE, users);
-        res.json({ success: true, freeTrials: users[idx].freeTrials, points: users[idx].points });
-    } catch(e) {
-        console.error(e);
-        res.status(500).json({ error: 'Server error' });
-    }
 });
 
 // ============================================================================
 // START
 // ============================================================================
 
-initDB().then(() => {
+async function checkSupabase() {
+    try {
+        const { error } = await supabase.from('users').select('id').limit(1);
+        if (error) throw error;
+        console.log('✓ Supabase aktif - data PERMANEN');
+    } catch(e) {
+        console.error('✗ Supabase error:', e.message);
+        console.log('Pastikan SUPABASE_URL dan SUPABASE_KEY sudah benar di environment variables Leapcell.');
+    }
+}
+
+checkSupabase().then(() => {
     app.listen(PORT, '0.0.0.0', () => {
+        console.log(`PolyglotQuest backend PORT:${PORT} | Supabase:true`);
         console.log(`
-╔══════════════════════════════════════╗
-║   PolyglotQuest Backend  PORT:${PORT}  ║
-╚══════════════════════════════════════╝
+╔══════════════════════════════════════════╗
+║   PolyglotQuest Backend  PORT:${PORT}    ║
+║   Database: Supabase (PERMANEN)          ║
+╚══════════════════════════════════════════╝
+HEALTH  GET  /api/ping
 AUTH    POST /api/auth/register
         POST /api/auth/login
         GET  /api/auth/me
         POST /api/auth/reset-request
-GAME    GET  /api/progress
+GAME    POST /api/user/deduct
+        GET  /api/progress
         POST /api/progress
         POST /api/payment/submit
         GET  /api/payments/user
 ADMIN   GET  /api/admin/users
         POST /api/admin/users/:id/password
         POST /api/admin/users/:id/add-trial
+        POST /api/admin/users/:id/add-points
         GET  /api/admin/payments/all
         POST /api/admin/payments/:id/approve
         POST /api/admin/payments/:id/reject

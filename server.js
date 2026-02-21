@@ -80,6 +80,9 @@ async function updateUser(id, updates) {
 
 app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now(), db: 'supabase' }));
 
+// ⬇️ WAJIB untuk Leapcell — health check endpoint
+app.get('/kaithhealth', (req, res) => res.status(200).send('OK'));
+
 // ============================================================================
 // AUTH ENDPOINTS
 // ============================================================================
@@ -528,6 +531,7 @@ checkSupabase().then(() => {
 ║   Database: Supabase (PERMANEN)          ║
 ╚══════════════════════════════════════════╝
 HEALTH  GET  /api/ping
+        GET  /kaithhealth  ← Leapcell health check
 AUTH    POST /api/auth/register
         POST /api/auth/login
         GET  /api/auth/me

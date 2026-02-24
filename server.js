@@ -511,7 +511,7 @@ app.get('/api/admin/reset-requests', async (req, res) => {
 const https = require('https');
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
 
 const AI_SYSTEM_PROMPTS = {
     english: `You are Luna, a friendly and encouraging English language tutor on PolyglotQuest. 

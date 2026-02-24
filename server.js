@@ -80,9 +80,6 @@ async function updateUser(id, updates) {
 
 app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now(), db: 'supabase' }));
 
-// ⬇️ WAJIB untuk Leapcell — health check endpoint
-app.get('/kaithhealth', (req, res) => res.status(200).send('OK'));
-
 // ============================================================================
 // AUTH ENDPOINTS
 // ============================================================================
@@ -508,6 +505,128 @@ app.get('/api/admin/reset-requests', async (req, res) => {
 });
 
 // ============================================================================
+// AI CONVERSATION — Google Gemini
+// ============================================================================
+
+const https = require('https');
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+
+const AI_SYSTEM_PROMPTS = {
+    english: `You are Luna, a friendly and encouraging English language tutor on PolyglotQuest. 
+Your role is to help Indonesian speakers practice conversational English.
+Always respond in English, but if the user writes in Indonesian, gently switch them to English with a translation hint.
+Keep responses SHORT (2-4 sentences max) and conversational.
+If the user makes grammar mistakes, kindly correct them at the end of your reply like: "💡 Tip: Instead of '...' try saying '...'"
+Support roleplay scenarios when asked (e.g. at restaurant, airport, hotel, shopping).
+Always end with a follow-up question to keep the conversation going.`,
+
+    japanese: `You are Hana (花), a friendly Japanese language tutor on PolyglotQuest.
+Help Indonesian speakers practice Japanese conversation.
+Use a mix of Japanese and romaji, always provide Indonesian translation in parentheses.
+Keep responses SHORT and conversational.
+Correct mistakes gently: "💡 Tip: '...' より '...' の方が自然です"
+Support roleplay scenarios. Always end with a question to continue conversation.`,
+
+    korean: `You are Soo-Jin (수진), a friendly Korean language tutor on PolyglotQuest.
+Help Indonesian speakers practice Korean conversation.
+Use Korean with romaji and Indonesian translation in parentheses.
+Keep responses SHORT and conversational.
+Correct mistakes gently. Always end with a question to keep conversation going.`,
+
+    mandarin: `You are Ming (明), a friendly Mandarin language tutor on PolyglotQuest.
+Help Indonesian speakers practice Mandarin conversation.
+Use Chinese characters with pinyin and Indonesian translation in parentheses.
+Keep responses SHORT and conversational.
+Correct mistakes gently. Always end with a question to continue conversation.`,
+
+    arabic: `You are Layla (ليلى), a friendly Arabic language tutor on PolyglotQuest.
+Help Indonesian speakers practice Arabic conversation.
+Use Arabic script with transliteration and Indonesian translation in parentheses.
+Keep responses SHORT and conversational.
+Correct mistakes gently. Always end with a question to continue conversation.`,
+
+    french: `You are Sophie, a friendly French language tutor on PolyglotQuest.
+Help Indonesian speakers practice French conversation.
+Use French with Indonesian translation in parentheses.
+Keep responses SHORT and conversational.
+Correct mistakes gently. Always end with a question to continue conversation.`,
+
+    spanish: `You are Carlos, a friendly Spanish language tutor on PolyglotQuest.
+Help Indonesian speakers practice Spanish conversation.
+Use Spanish with Indonesian translation in parentheses.
+Keep responses SHORT and conversational.
+Correct mistakes gently. Always end with a question to continue conversation.`,
+
+    indonesian: `You are Budi, a friendly language tutor on PolyglotQuest.
+Help users practice Indonesian language. Keep responses SHORT and conversational.
+Correct mistakes gently. Always end with a question to continue conversation.`
+};
+
+app.post('/api/ai/chat', async (req, res) => {
+    try {
+        const { messages, language, scenario } = req.body;
+        if (!messages || !language) return res.status(400).json({ error: 'messages dan language wajib diisi' });
+        if (!GEMINI_API_KEY) return res.status(500).json({ error: 'GEMINI_API_KEY belum dikonfigurasi di environment variables' });
+
+        const systemPrompt = AI_SYSTEM_PROMPTS[language] || AI_SYSTEM_PROMPTS.english;
+        const scenarioNote = scenario ? `\n\nCurrent roleplay scenario: ${scenario}. Stay in character for this scenario.` : '';
+
+        // Build conversation history for Gemini
+        const geminiMessages = messages.map(m => ({
+            role: m.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: m.content }]
+        }));
+
+        const body = JSON.stringify({
+            system_instruction: { parts: [{ text: systemPrompt + scenarioNote }] },
+            contents: geminiMessages,
+            generationConfig: {
+                temperature: 0.8,
+                maxOutputTokens: 300,
+                topP: 0.95
+            },
+            safetySettings: [
+                { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+                { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_MEDIUM_AND_ABOVE' }
+            ]
+        });
+
+        const response = await new Promise((resolve, reject) => {
+            const urlObj = new URL(GEMINI_URL);
+            const options = {
+                hostname: urlObj.hostname,
+                path: urlObj.pathname + urlObj.search,
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+            };
+            const request = https.request(options, (r) => {
+                let data = '';
+                r.on('data', chunk => data += chunk);
+                r.on('end', () => resolve({ status: r.statusCode, body: data }));
+            });
+            request.on('error', reject);
+            request.write(body);
+            request.end();
+        });
+
+        if (response.status !== 200) {
+            console.error('Gemini error:', response.body);
+            return res.status(500).json({ error: 'Gemini API error: ' + response.status });
+        }
+
+        const result = JSON.parse(response.body);
+        const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || 'Maaf, saya tidak bisa merespons saat ini.';
+        res.json({ reply: text });
+
+    } catch(e) {
+        console.error('AI Chat error:', e);
+        res.status(500).json({ error: 'Terjadi kesalahan server' });
+    }
+});
+
+// ============================================================================
 // START
 // ============================================================================
 
@@ -531,7 +650,6 @@ checkSupabase().then(() => {
 ║   Database: Supabase (PERMANEN)          ║
 ╚══════════════════════════════════════════╝
 HEALTH  GET  /api/ping
-        GET  /kaithhealth  ← Leapcell health check
 AUTH    POST /api/auth/register
         POST /api/auth/login
         GET  /api/auth/me

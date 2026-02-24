@@ -505,16 +505,16 @@ app.get('/api/admin/reset-requests', async (req, res) => {
 });
 
 // ============================================================================
-// AI CONVERSATION — Google Gemini
+// AI CONVERSATION — Anthropic Claude
 // ============================================================================
 
 const https = require('https');
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY || '';
+const CLAUDE_MODEL   = 'claude-haiku-4-5-20251001'; // cepat & murah, ideal untuk chat
 
 const AI_SYSTEM_PROMPTS = {
-    english: `You are Luna, a friendly and encouraging English language tutor on PolyglotQuest. 
+    english: `You are Luna, a friendly and encouraging English language tutor on PolyglotQuest.
 Your role is to help Indonesian speakers practice conversational English.
 Always respond in English, but if the user writes in Indonesian, gently switch them to English with a translation hint.
 Keep responses SHORT (2-4 sentences max) and conversational.
@@ -568,38 +568,40 @@ app.post('/api/ai/chat', async (req, res) => {
     try {
         const { messages, language, scenario } = req.body;
         if (!messages || !language) return res.status(400).json({ error: 'messages dan language wajib diisi' });
-        if (!GEMINI_API_KEY) return res.status(500).json({ error: 'GEMINI_API_KEY belum dikonfigurasi di environment variables' });
+        if (!CLAUDE_API_KEY) return res.status(500).json({ error: 'CLAUDE_API_KEY belum dikonfigurasi di environment variables' });
 
         const systemPrompt = AI_SYSTEM_PROMPTS[language] || AI_SYSTEM_PROMPTS.english;
         const scenarioNote = scenario ? `\n\nCurrent roleplay scenario: ${scenario}. Stay in character for this scenario.` : '';
 
-        // Build conversation history for Gemini
-        const geminiMessages = messages.map(m => ({
-            role: m.role === 'assistant' ? 'model' : 'user',
-            parts: [{ text: m.content }]
-        }));
+        // Claude API membutuhkan messages dengan role user/assistant bergantian
+        // dan harus dimulai dari user
+        const claudeMessages = messages
+            .filter(m => m.role === 'user' || m.role === 'assistant')
+            .map(m => ({ role: m.role, content: m.content }));
+
+        // Pastikan dimulai dengan user
+        if (claudeMessages.length === 0 || claudeMessages[0].role !== 'user') {
+            claudeMessages.unshift({ role: 'user', content: 'Hello' });
+        }
 
         const body = JSON.stringify({
-            system_instruction: { parts: [{ text: systemPrompt + scenarioNote }] },
-            contents: geminiMessages,
-            generationConfig: {
-                temperature: 0.8,
-                maxOutputTokens: 300,
-                topP: 0.95
-            },
-            safetySettings: [
-                { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
-                { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_MEDIUM_AND_ABOVE' }
-            ]
+            model: CLAUDE_MODEL,
+            max_tokens: 400,
+            system: systemPrompt + scenarioNote,
+            messages: claudeMessages
         });
 
         const response = await new Promise((resolve, reject) => {
-            const urlObj = new URL(GEMINI_URL);
             const options = {
-                hostname: urlObj.hostname,
-                path: urlObj.pathname + urlObj.search,
+                hostname: 'api.anthropic.com',
+                path: '/v1/messages',
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': CLAUDE_API_KEY,
+                    'anthropic-version': '2023-06-01',
+                    'Content-Length': Buffer.byteLength(body)
+                }
             };
             const request = https.request(options, (r) => {
                 let data = '';
@@ -612,12 +614,12 @@ app.post('/api/ai/chat', async (req, res) => {
         });
 
         if (response.status !== 200) {
-            console.error('Gemini error:', response.body);
-            return res.status(500).json({ error: 'Gemini API error: ' + response.status });
+            console.error('Claude API error:', response.status, response.body);
+            return res.status(500).json({ error: 'Claude API error: ' + response.status });
         }
 
         const result = JSON.parse(response.body);
-        const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || 'Maaf, saya tidak bisa merespons saat ini.';
+        const text = result?.content?.[0]?.text || 'Maaf, saya tidak bisa merespons saat ini.';
         res.json({ reply: text });
 
     } catch(e) {

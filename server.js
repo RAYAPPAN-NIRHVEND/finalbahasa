@@ -505,11 +505,80 @@ app.get('/api/admin/reset-requests', async (req, res) => {
 });
 
 // ============================================================================
-// AI CONVERSATION — Ditangani langsung oleh frontend via Groq API (gratis)
-// Server tidak perlu melakukan apapun untuk AI chat
+// AI CONVERSATION — Groq API (key tersimpan di server, aman)
 // ============================================================================
-app.post('/api/ai/chat', (req, res) => {
-    res.status(200).json({ info: 'AI chat kini langsung dari browser via Groq API.' });
+
+const https = require('https');
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const GROQ_MODEL   = 'llama-3.1-8b-instant';
+
+const AI_SYSTEM_PROMPTS = {
+    english:    `You are Luna, a friendly English tutor on PolyglotQuest helping Indonesian speakers. Respond in English only, SHORT (2-4 sentences), correct mistakes with "💡 Tip: ...", always end with a question.`,
+    japanese:   `You are Hana (花), a friendly Japanese tutor on PolyglotQuest. Use Japanese + romaji + Indonesian translation in parentheses. SHORT responses, correct mistakes gently, always end with a question.`,
+    korean:     `You are Soo-Jin (수진), a friendly Korean tutor on PolyglotQuest. Use Korean + romaji + Indonesian translation. SHORT responses, correct mistakes gently, always end with a question.`,
+    mandarin:   `You are Ming (明), a friendly Mandarin tutor on PolyglotQuest. Use Chinese + pinyin + Indonesian translation. SHORT responses, correct mistakes gently, always end with a question.`,
+    arabic:     `You are Layla (ليلى), a friendly Arabic tutor on PolyglotQuest. Use Arabic + transliteration + Indonesian translation. SHORT responses, correct mistakes gently, always end with a question.`,
+    french:     `You are Sophie, a friendly French tutor on PolyglotQuest. Use French + Indonesian translation. SHORT responses, correct mistakes gently, always end with a question.`,
+    spanish:    `You are Carlos, a friendly Spanish tutor on PolyglotQuest. Use Spanish + Indonesian translation. SHORT responses, correct mistakes gently, always end with a question.`,
+    indonesian: `You are Budi, a friendly Indonesian tutor on PolyglotQuest. Help practice Indonesian. SHORT responses, correct mistakes gently, always end with a question.`,
+};
+
+app.post('/api/ai/chat', async (req, res) => {
+    try {
+        if (!GROQ_API_KEY) return res.status(500).json({ error: 'GROQ_API_KEY belum dikonfigurasi di server' });
+
+        const { messages, language, scenario } = req.body;
+        if (!messages || !language) return res.status(400).json({ error: 'messages dan language wajib diisi' });
+
+        const systemPrompt = (AI_SYSTEM_PROMPTS[language] || AI_SYSTEM_PROMPTS.english)
+            + (scenario ? `\n\nCurrent roleplay scenario: ${scenario}. Stay in character.` : '');
+
+        const builtMessages = [{ role: 'system', content: systemPrompt }];
+        for (const m of messages) {
+            const role = m.role === 'assistant' ? 'assistant' : 'user';
+            builtMessages.push({ role, content: m.content });
+        }
+
+        const body = JSON.stringify({
+            model: GROQ_MODEL,
+            max_tokens: 400,
+            temperature: 0.82,
+            messages: builtMessages
+        });
+
+        const response = await new Promise((resolve, reject) => {
+            const req2 = https.request({
+                hostname: 'api.groq.com',
+                path: '/openai/v1/chat/completions',
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + GROQ_API_KEY,
+                    'Content-Length': Buffer.byteLength(body)
+                }
+            }, (r) => {
+                let data = '';
+                r.on('data', chunk => data += chunk);
+                r.on('end', () => resolve({ status: r.statusCode, body: data }));
+            });
+            req2.on('error', reject);
+            req2.write(body);
+            req2.end();
+        });
+
+        if (response.status !== 200) {
+            const parsed = (() => { try { return JSON.parse(response.body); } catch { return {}; } })();
+            return res.status(502).json({ error: parsed?.error?.message || 'Groq error: ' + response.status });
+        }
+
+        const result = JSON.parse(response.body);
+        const text = result?.choices?.[0]?.message?.content || 'Maaf, tidak ada respons.';
+        res.json({ reply: text });
+
+    } catch(e) {
+        console.error('AI Chat error:', e);
+        res.status(500).json({ error: 'Terjadi kesalahan server' });
+    }
 });
 
 // ============================================================================

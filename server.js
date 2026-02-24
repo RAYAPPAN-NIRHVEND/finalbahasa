@@ -505,13 +505,14 @@ app.get('/api/admin/reset-requests', async (req, res) => {
 });
 
 // ============================================================================
-// AI CONVERSATION — Anthropic Claude
+// AI CONVERSATION — Google Gemini 2.0 Flash
 // ============================================================================
 
 const https = require('https');
 
-const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY || '';
-const CLAUDE_MODEL   = 'claude-haiku-4-5-20251001'; // cepat & murah, ideal untuk chat
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_MODEL   = 'gemini-2.0-flash';
+const GEMINI_URL     = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
 const AI_SYSTEM_PROMPTS = {
     english: `You are Luna, a friendly and encouraging English language tutor on PolyglotQuest.
@@ -564,62 +565,86 @@ Help users practice Indonesian language. Keep responses SHORT and conversational
 Correct mistakes gently. Always end with a question to continue conversation.`
 };
 
+// Helper: call Gemini with 1 retry on 429
+async function callGemini(body, retries = 1) {
+    const urlObj = new URL(GEMINI_URL);
+    const options = {
+        hostname: urlObj.hostname,
+        path: urlObj.pathname + urlObj.search,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+    };
+    const response = await new Promise((resolve, reject) => {
+        const req = https.request(options, (r) => {
+            let data = '';
+            r.on('data', chunk => data += chunk);
+            r.on('end', () => resolve({ status: r.statusCode, body: data }));
+        });
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+    });
+    // Rate limit — wait 2s and retry once
+    if (response.status === 429 && retries > 0) {
+        await new Promise(r => setTimeout(r, 2000));
+        return callGemini(body, retries - 1);
+    }
+    return response;
+}
+
 app.post('/api/ai/chat', async (req, res) => {
     try {
         const { messages, language, scenario } = req.body;
         if (!messages || !language) return res.status(400).json({ error: 'messages dan language wajib diisi' });
-        if (!CLAUDE_API_KEY) return res.status(500).json({ error: 'CLAUDE_API_KEY belum dikonfigurasi di environment variables' });
+        if (!GEMINI_API_KEY) return res.status(500).json({ error: 'GEMINI_API_KEY belum dikonfigurasi di environment variables' });
 
         const systemPrompt = AI_SYSTEM_PROMPTS[language] || AI_SYSTEM_PROMPTS.english;
         const scenarioNote = scenario ? `\n\nCurrent roleplay scenario: ${scenario}. Stay in character for this scenario.` : '';
 
-        // Claude API membutuhkan messages dengan role user/assistant bergantian
-        // dan harus dimulai dari user
-        const claudeMessages = messages
-            .filter(m => m.role === 'user' || m.role === 'assistant')
-            .map(m => ({ role: m.role, content: m.content }));
-
-        // Pastikan dimulai dengan user
-        if (claudeMessages.length === 0 || claudeMessages[0].role !== 'user') {
-            claudeMessages.unshift({ role: 'user', content: 'Hello' });
+        // Gemini requires alternating user/model roles — ensure valid sequence
+        let geminiMessages = messages.map(m => ({
+            role: m.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: m.content }]
+        }));
+        // Must start with user
+        if (geminiMessages.length && geminiMessages[0].role === 'model') {
+            geminiMessages = geminiMessages.slice(1);
         }
+        // Remove consecutive same roles
+        const filtered = [];
+        for (const msg of geminiMessages) {
+            if (!filtered.length || filtered[filtered.length - 1].role !== msg.role) {
+                filtered.push(msg);
+            }
+        }
+        if (!filtered.length) filtered.push({ role: 'user', parts: [{ text: 'Hello' }] });
 
         const body = JSON.stringify({
-            model: CLAUDE_MODEL,
-            max_tokens: 400,
-            system: systemPrompt + scenarioNote,
-            messages: claudeMessages
+            system_instruction: { parts: [{ text: systemPrompt + scenarioNote }] },
+            contents: filtered,
+            generationConfig: {
+                temperature: 0.82,
+                maxOutputTokens: 350,
+                topP: 0.95
+            },
+            safetySettings: [
+                { category: 'HARM_CATEGORY_HARASSMENT',   threshold: 'BLOCK_ONLY_HIGH' },
+                { category: 'HARM_CATEGORY_HATE_SPEECH',  threshold: 'BLOCK_ONLY_HIGH' }
+            ]
         });
 
-        const response = await new Promise((resolve, reject) => {
-            const options = {
-                hostname: 'api.anthropic.com',
-                path: '/v1/messages',
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-api-key': CLAUDE_API_KEY,
-                    'anthropic-version': '2023-06-01',
-                    'Content-Length': Buffer.byteLength(body)
-                }
-            };
-            const request = https.request(options, (r) => {
-                let data = '';
-                r.on('data', chunk => data += chunk);
-                r.on('end', () => resolve({ status: r.statusCode, body: data }));
-            });
-            request.on('error', reject);
-            request.write(body);
-            request.end();
-        });
+        const response = await callGemini(body);
 
         if (response.status !== 200) {
-            console.error('Claude API error:', response.status, response.body);
-            return res.status(500).json({ error: 'Claude API error: ' + response.status });
+            console.error('Gemini error:', response.status, response.body);
+            const parsed = (() => { try { return JSON.parse(response.body); } catch { return {}; } })();
+            const msg = parsed?.error?.message || ('Gemini API error: ' + response.status);
+            return res.status(502).json({ error: msg });
         }
 
         const result = JSON.parse(response.body);
-        const text = result?.content?.[0]?.text || 'Maaf, saya tidak bisa merespons saat ini.';
+        const text = result?.candidates?.[0]?.content?.parts?.[0]?.text
+                  || 'Maaf, saya tidak bisa merespons saat ini.';
         res.json({ reply: text });
 
     } catch(e) {
